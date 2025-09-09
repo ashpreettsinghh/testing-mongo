@@ -1,94 +1,47 @@
-from pymongo import MongoClient
-import requests
+import re
+from math import sqrt
 
-MONGO_URI = "mongodb+srv://:@..mongodb.net/?retryWrites=true&w=majority&appName=JobSleuth"
-# 1. Connect to MongoDB Atlas
-client = MongoClient(MONGO_URI)  # Replace with your MongoDB Atlas URI
-db = client["devjobs"]
-collection = db["jobs"]
+def center(box):
+    return (box.left + box.width/2, box.top + box.height/2)
 
-# 2. Fetch all documents
-# docs = collection.find({}).sort("_id", 1)
-#
-# # 3. Loop through and update each document
-# for doc in docs:
-#     description = doc['description']
-#     json_data = {
-#         "modelName": "Qwen/Qwen3-Embedding-8B",
-#         "apiKey": "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",
-#         "inputText": f"{description}"
-#     }
-#
-#     response = requests.post(url="https://ai--iypm.onrender.com/vector-embedding/get-embedding",json=json_data)
-#     # Example: adding a new field 'status' with value 'active'
-#     vector = response.json()['Vector']
-#     collection.update_one(
-#         {"_id": doc["_id"]},  # find document by its unique _id
-#         {"$set": {"embedding": f"{vector[0]}"}}  # add/update the new field
-#     )
-#     print(doc)
-#
-# print("✅ All documents updated successfully!")
-#
+def euclidean_distance(b1, b2):
+    c1, c2 = center(b1), center(b2)
+    return sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
 
+def find_nearest_block(doc, regex, target_block_types=("SIGNATURE",)):
+    """
+    Find the nearest target block (SIGNATURE, WORD, etc.) to a regex-matched text block.
+    Checks in all directions (no top/bottom/left/right restriction).
+    """
+    results = []
+    pattern = re.compile(regex, re.IGNORECASE)
 
-# from pymongo.operations import SearchIndexModel
-# # Create your index model, then create the search index
-# search_index_model = SearchIndexModel(
-#   definition = {
-#     "fields": [
-#       {
-#         "type": "vector",
-#         "path": "embedding",
-#         "similarity": "cosine",
-#         "numDimensions": 4096
-#       }
-#     ]
-#   },
-#   name="vector_index",
-#   type="vectorSearch"
-# )
-# collection.create_search_index(model=search_index_model)
+    for page in doc.pages:
+        # anchors = text blocks matching regex
+        anchors = [line for line in page.lines if pattern.search(line.text)]
+        
+        for anchor in anchors:
+            candidates = [b for b in page.content if b.block_type in target_block_types]
+            if not candidates:
+                continue
 
+            # find nearest by Euclidean distance
+            nearest = min(
+                candidates, 
+                key=lambda c: euclidean_distance(anchor.geometry.boundingBox, c.geometry.boundingBox)
+            )
 
-# step1
-desc = "Coins is looking for a Senior Project Manager to lead and manage key projects, ensuring successful delivery on time and with excellent quality. They will collaborate with cross-functional teams and drive process improvements to contribute to the overall success of the product and services."
-json_data = {
-        "modelName": "Qwen/Qwen3-Embedding-8B",
-        "apiKey": "",
-        "inputText": f"{desc}"
-    }
+            results.append({
+                "anchor_text": anchor.text,
+                "nearest_block_type": nearest.block_type,
+                "nearest_box": nearest.geometry.boundingBox
+            })
 
-response = requests.post(url="https://ai--iypm.onrender.com/vector-embedding/get-embedding",json=json_data)
-# Example: adding a new field 'status' with value 'active'
-vector = response.json()['Vector']
+    return results
 
-# 2. Your query embedding (get from API)
-query_embedding = vector[0]  # replace with your API call
+matches = find_nearest_block(doc, r"(Authorized Signatory|Approver)", target_block_types=("SIGNATURE",))
 
-# 3. Run vector similarity search
-pipeline = [
-    {
-        "$vectorSearch": {
-            "queryVector": query_embedding,
-            "path": "embedding",
-            "numCandidates": 300,
-            "limit": 5,
-            "index": "vector_index"
-        }
-    },
-    {
-        "$project": {
-            "description": 1,
-            "score": {"$meta": "vectorSearchScore"}
-        }
-    }
-]
-
-results = list(collection.aggregate(pipeline))
-
-# 4. Print results
-for r in results:
-    print(f"Doc ID: {r['_id']}, Score: {r['score']:.4f}, Desc: {r['description']}")
-
-
+for m in matches:
+    print("Anchor:", m["anchor_text"])
+    print("Nearest block type:", m["nearest_block_type"])
+    print("Bounding box:", m["nearest_box"])
