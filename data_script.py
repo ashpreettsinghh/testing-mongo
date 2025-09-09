@@ -1,32 +1,19 @@
 import re
 import boto3
 from math import sqrt
-from trp import Document
 
 
-# --------------------------
-# Helpers
-# --------------------------
 def get_bbox(block):
-    """
-    Normalize bounding box access for TRP objects and raw Textract dicts.
-    """
-    # TRP object
-    if hasattr(block, "geometry") and hasattr(block.geometry, "boundingBox"):
-        return block.geometry.boundingBox
-    # Raw dict
-    elif isinstance(block, dict) and "Geometry" in block:
-        return block["Geometry"]["BoundingBox"]
-    else:
-        raise TypeError(f"Unsupported block type: {type(block)}")
+    """Extract bounding box from Textract block dict."""
+    return block["Geometry"]["BoundingBox"]
 
 
 def center(bbox):
-    """Return (x,y) center of a bounding box."""
-    if isinstance(bbox, dict):
-        return (bbox["Left"] + bbox["Width"] / 2, bbox["Top"] + bbox["Height"] / 2)
-    else:  # TRP boundingBox object
-        return (bbox.left + bbox.width / 2, bbox.top + bbox.height / 2)
+    """Return (x, y) center of a bounding box."""
+    return (
+        bbox["Left"] + bbox["Width"] / 2,
+        bbox["Top"] + bbox["Height"] / 2
+    )
 
 
 def euclidean_distance(b1, b2):
@@ -35,42 +22,35 @@ def euclidean_distance(b1, b2):
     return sqrt((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2)
 
 
-# --------------------------
-# Main function
-# --------------------------
 def find_nearest_block(response, regex, target_block_types=("SIGNATURE",)):
     """
-    Given a Textract response and regex, find the nearest block(s) of target_block_types.
-    Works for both TRP objects and raw Textract JSON.
+    Works directly with Textract raw response (dicts).
+    Finds the block nearest to regex-matching text.
     """
-    results = []
     pattern = re.compile(regex, re.IGNORECASE)
+    blocks = response["Blocks"]
+    results = []
 
-    # Wrap with TRP for convenience
-    doc = Document(response)
+    # Anchors: regex matches in LINE or WORD text
+    anchors = [b for b in blocks if b["BlockType"] in ("LINE", "WORD") and pattern.search(b.get("Text", ""))]
 
-    for page in doc.pages:
-        # Anchors: regex matches in text lines
-        anchors = [line for line in page.lines if pattern.search(line.text)]
+    # Candidates: target block types
+    candidates = [b for b in blocks if b["BlockType"] in target_block_types]
 
-        # Candidates: matching block types
-        candidates = [b for b in page.blocks if b.block_type in target_block_types]
+    for anchor in anchors:
+        if not candidates:
+            continue
 
-        for anchor in anchors:
-            if not candidates:
-                continue
+        nearest = min(
+            candidates,
+            key=lambda c: euclidean_distance(get_bbox(anchor), get_bbox(c))
+        )
 
-            # Pick nearest
-            nearest = min(
-                candidates,
-                key=lambda c: euclidean_distance(get_bbox(anchor), get_bbox(c))
-            )
-
-            results.append({
-                "anchor_text": anchor.text,
-                "nearest_block_type": nearest.block_type,
-                "nearest_box": get_bbox(nearest)
-            })
+        results.append({
+            "anchor_text": anchor.get("Text", ""),
+            "nearest_block_type": nearest["BlockType"],
+            "nearest_box": get_bbox(nearest)
+        })
 
     return results
 
@@ -81,7 +61,7 @@ def find_nearest_block(response, regex, target_block_types=("SIGNATURE",)):
 if __name__ == "__main__":
     client = boto3.client("textract")
 
-    # Example: analyze a form
+    # Example: analyze document
     response = client.analyze_document(
         Document={"S3Object": {"Bucket": "your-bucket", "Name": "your-doc.pdf"}},
         FeatureTypes=["FORMS", "SIGNATURES"]
