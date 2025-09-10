@@ -7,7 +7,7 @@ from textractparser import trp
 class SignatureMapper:
 “””
 A class to map signature-related text to actual signature blocks in Textract output.
-Uses advanced field organization and line-based processing similar to your existing logic.
+Uses advanced field organization and handles competitive mapping scenarios.
 “””
 
 ```
@@ -38,40 +38,61 @@ def __init__(self, signature_patterns: Optional[List[str]] = None, line_toleranc
 
 def make_organized_content(self, json_data: Dict) -> List[List[Dict]]:
     """
-    Organize form fields into lines based on your existing logic.
-    This mirrors the make_text_files function from your code.
+    Organize form fields and text blocks into lines based on geometric position.
     
     Args:
         json_data: Raw Textract JSON response
         
     Returns:
-        List of lines, where each line is a list of field blocks
+        List of lines, where each line is a list of blocks (form fields + text blocks)
     """
     doc = trp.Document(json_data)
     all_organized_content = []
     
     for page in doc.pages:
-        # Get all form fields and sort by top position
-        sorted_fields = []
+        all_blocks = []
+        
+        # Add form fields
         if hasattr(page, 'form') and page.form and hasattr(page.form, 'fields'):
             for field in page.form.fields:
-                sorted_fields.append({
-                    'field': field,
-                    'geometry': field.geometry if hasattr(field, 'geometry') else None,
-                    'key': field.key.text if field.key else '',
-                    'value': field.value.text if field.value else '',
-                    'key_id': field.key.id if field.key else '',
-                    'value_id': field.value.id if field.value else '',
-                })
+                # Add key block
+                if field.key:
+                    all_blocks.append({
+                        'type': 'form_key',
+                        'text': field.key.text or '',
+                        'geometry': field.key.geometry,
+                        'block_id': field.key.id,
+                        'field_ref': field
+                    })
+                
+                # Add value block  
+                if field.value:
+                    all_blocks.append({
+                        'type': 'form_value',
+                        'text': field.value.text or '',
+                        'geometry': field.value.geometry,
+                        'block_id': field.value.id,
+                        'field_ref': field
+                    })
         
-        # Sort by top position (Y coordinate)
-        sorted_fields.sort(key=lambda block: block['geometry'].bounding_box.top if block['geometry'] else 0)
+        # Add text lines (which might contain signature-related text)
+        for line in page.lines:
+            all_blocks.append({
+                'type': 'text_line',
+                'text': line.text or '',
+                'geometry': line.geometry,
+                'block_id': line.id,
+                'line_ref': line
+            })
         
-        # Group fields into lines
+        # Sort all blocks by top position (Y coordinate)
+        all_blocks.sort(key=lambda block: block['geometry'].bounding_box.top if block['geometry'] else 0)
+        
+        # Group blocks into lines based on Y position
         sorted_content = []
         current_line = []
         
-        for block_info in sorted_fields:
+        for block_info in all_blocks:
             if not current_line:
                 current_line.append(block_info)
             else:
@@ -100,262 +121,232 @@ def make_organized_content(self, json_data: Dict) -> List[List[Dict]]:
     return all_organized_content
 
 def calculate_distance(self, point1: Dict, point2: Dict) -> float:
-    """
-    Calculate Euclidean distance between two points.
-    """
+    """Calculate Euclidean distance between two points."""
     return math.sqrt((point1['x'] - point2['x'])**2 + (point1['y'] - point2['y'])**2)
 
 def get_geometry_center(self, geometry) -> Dict[str, float]:
-    """
-    Get the center point of a geometry's bounding box.
-    """
+    """Get the center point of a geometry's bounding box."""
     if hasattr(geometry, 'bounding_box'):
         bbox = geometry.bounding_box
+        return {
+            'x': bbox.left + bbox.width / 2,
+            'y': bbox.top + bbox.height / 2
+        }
     elif isinstance(geometry, dict) and 'BoundingBox' in geometry:
         bbox = geometry['BoundingBox']
+        return {
+            'x': bbox['Left'] + bbox['Width'] / 2,
+            'y': bbox['Top'] + bbox['Height'] / 2
+        }
     else:
         return {'x': 0, 'y': 0}
-    
-    return {
-        'x': bbox.left + bbox.width / 2 if hasattr(bbox, 'left') else bbox['Left'] + bbox['Width'] / 2,
-        'y': bbox.top + bbox.height / 2 if hasattr(bbox, 'top') else bbox['Top'] + bbox['Height'] / 2
-    }
 
 def find_signature_text_in_organized_content(self, organized_content: List[Dict]) -> List[Dict]:
-    """
-    Find signature-related text in the organized content.
-    
-    Args:
-        organized_content: Organized form fields
-        
-    Returns:
-        List of signature text information
-    """
+    """Find signature-related text in the organized content."""
     signature_texts = []
     
-    for i, field_info in enumerate(organized_content):
-        # Check both key and value for signature patterns
-        texts_to_check = []
+    for i, block_info in enumerate(organized_content):
+        text = block_info['text'].strip()
         
-        if field_info['key']:
-            texts_to_check.append({
-                'text': field_info['key'],
-                'type': 'key',
-                'id': field_info['key_id'],
-                'geometry': field_info['field'].key.geometry if field_info['field'].key else None
-            })
-        
-        if field_info['value']:
-            texts_to_check.append({
-                'text': field_info['value'],
-                'type': 'value', 
-                'id': field_info['value_id'],
-                'geometry': field_info['field'].value.geometry if field_info['field'].value else None
-            })
-        
-        for text_info in texts_to_check:
-            text = text_info['text'].strip()
-            
-            # Check if text matches any signature pattern
-            for pattern_idx, pattern in enumerate(self.compiled_patterns):
-                if pattern.search(text):
-                    signature_texts.append({
-                        'text': text,
-                        'pattern_matched': self.signature_patterns[pattern_idx],
-                        'field_type': text_info['type'],
-                        'field_id': text_info['id'],
-                        'geometry': text_info['geometry'],
-                        'center': self.get_geometry_center(text_info['geometry']) if text_info['geometry'] else {'x': 0, 'y': 0},
-                        'line_index': i,
-                        'full_field_info': field_info
-                    })
-                    break
+        # Check if text matches any signature pattern
+        for pattern_idx, pattern in enumerate(self.compiled_patterns):
+            if pattern.search(text):
+                signature_texts.append({
+                    'text': text,
+                    'pattern_matched': self.signature_patterns[pattern_idx],
+                    'block_type': block_info['type'],
+                    'block_id': block_info['block_id'],
+                    'geometry': block_info['geometry'],
+                    'center': self.get_geometry_center(block_info['geometry']),
+                    'line_index': i,
+                    'full_block_info': block_info
+                })
+                break  # Stop after first match to avoid duplicates
     
     return signature_texts
 
-def find_signature_blocks_advanced(self, json_data: Dict) -> List[Dict]:
+def find_signature_blocks_from_raw_blocks(self, json_data: Dict) -> List[Dict]:
     """
-    Find signature blocks using advanced detection methods.
+    Find signature blocks by looking at raw Textract blocks.
+    This looks for actual SIGNATURE type blocks, not form fields.
     """
-    doc = trp.Document(json_data)
     signature_blocks = []
     
-    for page in doc.pages:
-        # Method 1: Look for explicit signature blocks
-        for block in page.blocks:
-            if hasattr(block, 'block_type') and block.block_type == 'SIGNATURE':
+    # Parse raw blocks from JSON
+    if 'Blocks' in json_data:
+        for block in json_data['Blocks']:
+            # Look for signature blocks
+            if block.get('BlockType') == 'SIGNATURE':
                 signature_blocks.append({
-                    'block_id': block.id,
-                    'geometry': block.geometry,
-                    'center': self.get_geometry_center(block.geometry),
-                    'page_number': page.id,
-                    'confidence': getattr(block, 'confidence', None),
-                    'detection_method': 'explicit_signature_block'
+                    'block_id': block.get('Id'),
+                    'geometry': block.get('Geometry', {}),
+                    'center': self.get_geometry_center(block.get('Geometry', {})),
+                    'confidence': block.get('Confidence'),
+                    'detection_method': 'textract_signature_block'
                 })
-        
-        # Method 2: Look for form fields that might be signature fields
-        if hasattr(page, 'form') and page.form and hasattr(page.form, 'fields'):
-            for field in page.form.fields:
-                # Check if field key suggests it's a signature field
-                key_text = field.key.text.lower() if field.key and field.key.text else ''
-                value_text = field.value.text.lower() if field.value and field.value.text else ''
-                
-                is_signature_field = False
-                detection_method = ''
-                
-                # Check if key indicates signature
-                if any(pattern.search(key_text) for pattern in self.compiled_patterns):
-                    is_signature_field = True
-                    detection_method = 'key_pattern_match'
-                
-                # Check if value is empty (common for signature fields)
-                elif 'signature' in key_text and not value_text.strip():
-                    is_signature_field = True
-                    detection_method = 'empty_signature_field'
-                
-                # Check for common signature field indicators
-                elif any(indicator in key_text for indicator in ['sign', 'x mark', 'initial', 'auth']):
-                    is_signature_field = True
-                    detection_method = 'signature_indicator'
-                
-                if is_signature_field:
-                    # Use the value geometry if available, otherwise key geometry
-                    geometry = field.value.geometry if field.value else field.key.geometry
-                    if geometry:
+            
+            # Also look for blocks that might be signature areas (empty form fields, etc.)
+            elif (block.get('BlockType') == 'LINE' and 
+                  not block.get('Text', '').strip() and
+                  block.get('Geometry', {}).get('BoundingBox', {}).get('Width', 0) > 0.1):
+                # This might be an empty signature line
+                signature_blocks.append({
+                    'block_id': block.get('Id'),
+                    'geometry': block.get('Geometry', {}),
+                    'center': self.get_geometry_center(block.get('Geometry', {})),
+                    'confidence': block.get('Confidence'),
+                    'detection_method': 'empty_line_signature_candidate'
+                })
+    
+    # Also use TRP to find any additional signature blocks
+    try:
+        doc = trp.Document(json_data)
+        for page in doc.pages:
+            for block in page.blocks:
+                if hasattr(block, 'block_type') and block.block_type == 'SIGNATURE':
+                    # Avoid duplicates
+                    if not any(sb['block_id'] == block.id for sb in signature_blocks):
                         signature_blocks.append({
-                            'block_id': field.value.id if field.value else field.key.id,
-                            'geometry': geometry,
-                            'center': self.get_geometry_center(geometry),
-                            'page_number': page.id,
-                            'confidence': None,
-                            'detection_method': detection_method,
-                            'field_key': key_text,
-                            'field_value': value_text
+                            'block_id': block.id,
+                            'geometry': block.geometry,
+                            'center': self.get_geometry_center(block.geometry),
+                            'confidence': getattr(block, 'confidence', None),
+                            'detection_method': 'trp_signature_block'
                         })
+    except Exception as e:
+        print(f"Warning: Could not parse with TRP: {e}")
     
     return signature_blocks
 
-def find_nearest_signature_advanced(self, text_info: Dict, signature_blocks: List[Dict], 
-                                  max_distance: float = 0.15) -> Optional[Dict]:
+def create_competitive_mappings(self, signature_texts: List[Dict], 
+                              signature_blocks: List[Dict], 
+                              max_distance: float = 0.15) -> Dict:
     """
-    Find the nearest signature block using advanced matching logic.
+    Create mappings using competitive assignment to handle cases where
+    multiple signature texts compete for the same signature block.
     """
-    if not signature_blocks:
-        return None
-    
-    # Calculate distances and potential matches
+    # Calculate all possible text-to-block distances
     candidates = []
     
-    for block in signature_blocks:
-        distance = self.calculate_distance(text_info['center'], block['center'])
-        
-        # Scoring system for better matching
-        score = distance
-        
-        # Bonus for being on the same logical line (lower score is better)
-        if abs(text_info['center']['y'] - block['center']['y']) < self.line_tolerance:
-            score *= 0.5  # Significant bonus for same line
-        
-        # Bonus for being to the right of the text (common signature placement)
-        if block['center']['x'] > text_info['center']['x']:
-            score *= 0.8
-        
-        # Penalty for being too far away
-        if distance > max_distance:
-            score *= 2
-        
-        candidates.append({
-            'block': block,
-            'distance': distance,
-            'score': score
-        })
+    for text_idx, text_info in enumerate(signature_texts):
+        for block_idx, block_info in enumerate(signature_blocks):
+            distance = self.calculate_distance(text_info['center'], block_info['center'])
+            
+            if distance <= max_distance:
+                # Create a scoring system
+                score = distance
+                
+                # Bonus for being on the same logical line
+                if abs(text_info['center']['y'] - block_info['center']['y']) < self.line_tolerance:
+                    score *= 0.5
+                
+                # Bonus for signature being to the right of text
+                if block_info['center']['x'] > text_info['center']['x']:
+                    score *= 0.8
+                
+                candidates.append({
+                    'text_idx': text_idx,
+                    'block_idx': block_idx,
+                    'text_info': text_info,
+                    'block_info': block_info,
+                    'distance': distance,
+                    'score': score
+                })
     
-    # Sort by score (lower is better)
+    # Sort candidates by score (lower is better)
     candidates.sort(key=lambda x: x['score'])
     
-    best_candidate = candidates[0] if candidates else None
+    # Perform greedy assignment - assign best matches first
+    used_texts = set()
+    used_blocks = set()
+    mappings = []
     
-    if best_candidate and best_candidate['distance'] <= max_distance:
-        result = best_candidate['block'].copy()
-        result['distance'] = best_candidate['distance']
-        result['match_score'] = best_candidate['score']
-        return result
+    for candidate in candidates:
+        text_idx = candidate['text_idx']
+        block_idx = candidate['block_idx']
+        
+        # Skip if either text or block is already assigned
+        if text_idx in used_texts or block_idx in used_blocks:
+            continue
+        
+        # Create mapping
+        mappings.append({
+            'signature_text': candidate['text_info']['text'],
+            'pattern_matched': candidate['text_info']['pattern_matched'],
+            'block_type': candidate['text_info']['block_type'],
+            'text_block_id': candidate['text_info']['block_id'],
+            'signature_block_id': candidate['block_info']['block_id'],
+            'distance': candidate['distance'],
+            'match_score': candidate['score'],
+            'line_index': candidate['text_info']['line_index'],
+            'detection_method': candidate['block_info']['detection_method'],
+            'text_center': candidate['text_info']['center'],
+            'signature_center': candidate['block_info']['center']
+        })
+        
+        # Mark as used
+        used_texts.add(text_idx)
+        used_blocks.add(block_idx)
     
-    return None
+    # Find unmapped texts
+    unmapped_texts = []
+    for i, text_info in enumerate(signature_texts):
+        if i not in used_texts:
+            unmapped_texts.append({
+                'signature_text': text_info['text'],
+                'pattern_matched': text_info['pattern_matched'],
+                'block_type': text_info['block_type'],
+                'text_block_id': text_info['block_id'],
+                'line_index': text_info['line_index'],
+                'reason': 'Could not find signature block within acceptable distance or block was assigned to closer text'
+            })
+    
+    return {
+        'mappings': mappings,
+        'unmapped_texts': unmapped_texts,
+        'used_block_indices': used_blocks,
+        'competition_candidates': len(candidates)
+    }
 
 def map_signatures_advanced(self, textract_json: Dict, max_distance: float = 0.15) -> Dict:
     """
-    Advanced signature mapping using organized content and sophisticated matching.
+    Advanced signature mapping with competitive assignment.
     """
     try:
-        # Organize content using your logic
+        # Organize all content (forms + text)
         organized_content = self.make_organized_content(textract_json)
         
         # Find signature texts in organized content
         signature_texts = self.find_signature_text_in_organized_content(organized_content)
         
-        # Find signature blocks using advanced detection
-        signature_blocks = self.find_signature_blocks_advanced(textract_json)
+        # Find signature blocks from raw Textract blocks
+        signature_blocks = self.find_signature_blocks_from_raw_blocks(textract_json)
         
-        # Map signature texts to signature blocks
-        mappings = []
-        unmapped_texts = []
-        used_blocks = set()
-        
-        # Sort signature texts by line position for consistent processing
-        signature_texts.sort(key=lambda x: (x['line_index'], x['center']['x']))
-        
-        for text_info in signature_texts:
-            # Find available signature blocks
-            available_blocks = [
-                block for block in signature_blocks 
-                if block['block_id'] not in used_blocks
-            ]
-            
-            nearest_block = self.find_nearest_signature_advanced(text_info, available_blocks, max_distance)
-            
-            if nearest_block:
-                mappings.append({
-                    'signature_text': text_info['text'],
-                    'pattern_matched': text_info['pattern_matched'],
-                    'field_type': text_info['field_type'],
-                    'text_field_id': text_info['field_id'],
-                    'signature_block_id': nearest_block['block_id'],
-                    'distance': nearest_block['distance'],
-                    'match_score': nearest_block['match_score'],
-                    'line_index': text_info['line_index'],
-                    'detection_method': nearest_block['detection_method'],
-                    'text_center': text_info['center'],
-                    'signature_center': nearest_block['center']
-                })
-                used_blocks.add(nearest_block['block_id'])
-            else:
-                unmapped_texts.append({
-                    'signature_text': text_info['text'],
-                    'pattern_matched': text_info['pattern_matched'],
-                    'field_type': text_info['field_type'],
-                    'text_field_id': text_info['field_id'],
-                    'line_index': text_info['line_index'],
-                    'reason': 'Could not find signature block within acceptable distance'
-                })
+        # Use competitive mapping
+        mapping_result = self.create_competitive_mappings(
+            signature_texts, signature_blocks, max_distance
+        )
         
         return {
             'total_signature_texts_found': len(signature_texts),
             'total_signature_blocks_found': len(signature_blocks),
-            'successful_mappings': len(mappings),
-            'unmapped_texts': len(unmapped_texts),
-            'mappings': mappings,
-            'unmapped': unmapped_texts,
+            'successful_mappings': len(mapping_result['mappings']),
+            'unmapped_texts': len(mapping_result['unmapped_texts']),
+            'competition_candidates': mapping_result['competition_candidates'],
+            'mappings': mapping_result['mappings'],
+            'unmapped': mapping_result['unmapped_texts'],
             'unused_signature_blocks': [
-                block for block in signature_blocks 
-                if block['block_id'] not in used_blocks
+                block for i, block in enumerate(signature_blocks) 
+                if i not in mapping_result['used_block_indices']
             ],
-            'organized_fields_count': len(organized_content)
+            'organized_content_count': len(organized_content)
         }
         
     except Exception as e:
+        import traceback
         return {
             'error': f"Error processing Textract output: {str(e)}",
+            'traceback': traceback.format_exc(),
             'total_signature_texts_found': 0,
             'total_signature_blocks_found': 0,
             'successful_mappings': 0,
@@ -391,15 +382,16 @@ except Exception as e:
 # Example usage
 
 if **name** == “**main**”:
-# Example with advanced processing
+# Example with competitive mapping
 result = process_textract_signatures_advanced(‘textract_output.json’)
 
 ```
 # Print detailed results
 print("=== Advanced Signature Mapping Results ===")
-print(f"Total organized fields: {result.get('organized_fields_count', 0)}")
+print(f"Total organized content blocks: {result.get('organized_content_count', 0)}")
 print(f"Total signature texts found: {result.get('total_signature_texts_found', 0)}")
 print(f"Total signature blocks found: {result.get('total_signature_blocks_found', 0)}")
+print(f"Competition candidates evaluated: {result.get('competition_candidates', 0)}")
 print(f"Successful mappings: {result.get('successful_mappings', 0)}")
 print(f"Unmapped texts: {result.get('unmapped_texts', 0)}")
 
@@ -407,7 +399,7 @@ if 'mappings' in result and result['mappings']:
     print("\n=== Successful Mappings ===")
     for i, mapping in enumerate(result['mappings'], 1):
         print(f"{i}. Text: '{mapping['signature_text']}'")
-        print(f"   Field Type: {mapping['field_type']}")
+        print(f"   Block Type: {mapping['block_type']}")
         print(f"   Pattern: {mapping['pattern_matched']}")
         print(f"   Distance: {mapping['distance']:.4f}")
         print(f"   Match Score: {mapping['match_score']:.4f}")
@@ -419,28 +411,19 @@ if 'unmapped' in result and result['unmapped']:
     print("=== Could Not Find Signature For Text ===")
     for unmapped in result['unmapped']:
         print(f"- Text: '{unmapped['signature_text']}'")
-        print(f"  Field Type: {unmapped['field_type']}")
+        print(f"  Block Type: {unmapped['block_type']}")
         print(f"  Pattern: {unmapped['pattern_matched']}")
         print(f"  Line Index: {unmapped['line_index']}")
         print(f"  Reason: {unmapped['reason']}")
         print()
 
-# Example with custom settings
-custom_patterns = [
-    r'\b[Ss]ignature\b',
-    r'\b[Aa]uthorized\s+[Ss]ignature\b',
-    r'\b[Dd]igital\s+[Ss]ignature\b',
-    r'\b[Ss]ign\s+[Hh]ere\b'
-]
+if 'unused_signature_blocks' in result and result['unused_signature_blocks']:
+    print(f"\n=== Unused Signature Blocks: {len(result['unused_signature_blocks'])} ===")
+    for block in result['unused_signature_blocks']:
+        print(f"- Block ID: {block['block_id']}")
+        print(f"  Detection Method: {block['detection_method']}")
+        print(f"  Center: ({block['center']['x']:.3f}, {block['center']['y']:.3f})")
+        print()
 
-print("=== Processing with Custom Patterns ===")
-custom_result = process_textract_signatures_advanced(
-    'textract_output.json',
-    custom_patterns=custom_patterns,
-    max_distance=0.2,
-    line_tolerance=0.015
-)
-
-print(f"Custom processing found {custom_result.get('successful_mappings', 0)} mappings")
 print("Script completed successfully!")
 ```
