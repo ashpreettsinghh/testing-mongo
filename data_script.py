@@ -1,26 +1,41 @@
-form_fields = []
+
+def sort_form_fields_by_position(form_fields, line_tolerance=0.01):
+    """Sort form fields by position - top to bottom, left to right"""
+    if not form_fields:
+        return []
     
-    for page_num, page in enumerate(doc.pages, 1):
-        for field_idx, field in enumerate(page.form.fields):
-            if field.key and field.value:
-                key = field.key.text.strip() if field.key.text else None
-                value = field.value.text.strip() if field.value.text else None
+    # First sort all fields by top position
+    sorted_fields = sorted(form_fields, 
+                          key=lambda field: field["bbox"]["Top"] if field["bbox"] else float('inf'))
+    
+    sorted_result = []
+    current_line = []
+    
+    for field in sorted_fields:
+        if not field["bbox"]:  # Skip fields without bbox
+            sorted_result.append(field)
+            continue
+            
+        if not current_line:
+            # First field in line
+            current_line.append(field)
+        else:
+            last_field = current_line[-1]
+            
+            # Check if current field is on same line as last field
+            if abs(field["bbox"]["Top"] - last_field["bbox"]["Top"]) <= line_tolerance:
+                current_line.append(field)
+            else:
+                # New line detected - sort current line by Left position and add to result
+                current_line.sort(key=lambda f: f["bbox"]["Left"] if f["bbox"] else 0)
+                sorted_result.extend(current_line)
                 
-                if key:  # Only add if key is not empty
-                    field_data = {
-                        "field_id": f"page_{page_num}_field_{field_idx}",
-                        "key": key,
-                        "value": value,
-                        "page_number": page_num,
-                        "field_index": field_idx,
-                        "key_bbox": field.key.geometry.boundingBox.__dict__ if field.key.geometry else None,
-                        "value_bbox": field.value.geometry.boundingBox.__dict__ if field.value.geometry else None,
-                        "key_polygon": [{"x": p.x, "y": p.y} for p in field.key.geometry.polygon] if field.key.geometry else None,
-                        "value_polygon": [{"x": p.x, "y": p.y} for p in field.value.geometry.polygon] if field.value.geometry else None,
-                        "key_confidence": getattr(field.key, 'confidence', 0.0),
-                        "value_confidence": getattr(field.value, 'confidence', 0.0),
-                        "created_at": None,  # You can add timestamp if needed
-                        "processed": False   # Flag for post-processing tracking
-                    }
-                    
-                    form_fields.append(field_data)
+                # Start new line
+                current_line = [field]
+    
+    # Sort and add the last line
+    if current_line:
+        current_line.sort(key=lambda f: f["bbox"]["Left"] if f["bbox"] else 0)
+        sorted_result.extend(current_line)
+    
+    return sorted_result
