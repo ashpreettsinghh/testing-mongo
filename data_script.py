@@ -1,40 +1,26 @@
-from trp import Document
-
-def sort_fields_top_left(doc):
-    for page in doc.pages:
-        sorted_fields = []
-        for field in page.form.fields:
-            sorted_fields.append(field)
-
-        sorted_fields.sort(key=lambda block: block.geometry.boundingBox.top)
-
-        sorted_content = []
-        current_line = []
-        line_tolerance = 0.01
-
-        for block in sorted_fields:
-            if not current_line:
-                current_line.append(block)
-            else:
-                last_block_in_line = current_line[-1]
-                # Check if the block is on the same line
-                if abs(block.geometry.boundingBox.top - last_block_in_line.geometry.boundingBox.top) < line_tolerance:
-                    current_line.append(block)
-                else:
-                    # Sort current line by left property
-                    current_line.sort(key=lambda b: b.geometry.boundingBox.left)
-                    sorted_content.extend(current_line)
-                    current_line = [block]
-        # Add the last line
-        if current_line:
-            current_line.sort(key=lambda b: b.geometry.boundingBox.left)
-            sorted_content.extend(current_line)
-
-        # Replace the page's form.fields with the sorted fields (if you want in-place update)
-        page.form.fields = sorted_content  # This is safe if you just want new field order
-
-    return doc  # Output remains a trp.Document object
-
-# Usage:
-# sorted_doc = sort_fields_top_left(doc)
-
+form_fields = []
+    
+    for page_num, page in enumerate(doc.pages, 1):
+        for field_idx, field in enumerate(page.form.fields):
+            if field.key and field.value:
+                key = field.key.text.strip() if field.key.text else None
+                value = field.value.text.strip() if field.value.text else None
+                
+                if key:  # Only add if key is not empty
+                    field_data = {
+                        "field_id": f"page_{page_num}_field_{field_idx}",
+                        "key": key,
+                        "value": value,
+                        "page_number": page_num,
+                        "field_index": field_idx,
+                        "key_bbox": field.key.geometry.boundingBox.__dict__ if field.key.geometry else None,
+                        "value_bbox": field.value.geometry.boundingBox.__dict__ if field.value.geometry else None,
+                        "key_polygon": [{"x": p.x, "y": p.y} for p in field.key.geometry.polygon] if field.key.geometry else None,
+                        "value_polygon": [{"x": p.x, "y": p.y} for p in field.value.geometry.polygon] if field.value.geometry else None,
+                        "key_confidence": getattr(field.key, 'confidence', 0.0),
+                        "value_confidence": getattr(field.value, 'confidence', 0.0),
+                        "created_at": None,  # You can add timestamp if needed
+                        "processed": False   # Flag for post-processing tracking
+                    }
+                    
+                    form_fields.append(field_data)
