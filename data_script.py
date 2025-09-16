@@ -1,18 +1,31 @@
-from datamodel_code_generator import InputFileType, generate
+form_fields = []
+blocks_map = {block.id: block for page in doc.pages for block in page.form.fields}
 
-def generate_pydantic_from_json(json_file_path: str, output_file_path: str):
-    with open(json_file_path, 'r', encoding='utf-8') as f:
-        json_data = f.read()
+def find_parent_key(block, blocks_map):
+    # Iterate all blocks to find one that has the current block's id in CHILD relationships
+    for blk in blocks_map.values():
+        if blk.block_type == "KEY_VALUE_SET" and "KEY" in blk.entity_types:
+            for rel in blk.relationships or []:
+                if rel.type == "CHILD" and block.id in rel.ids:
+                    # Found a parent key block, get its text children
+                    return blk.text
+    return None
 
-    code = generate(
-        input_text=json_data,
-        input_file_type=InputFileType.Json,
-        # You can add options here like target Python version, class name, etc.
-    )
+for page in doc.pages:
+    for field in page.form.fields:
+        if field.key and field.value:
+            key = field.key.text.strip() if field.key.text else None
+            value = field.value.text.strip() if field.value.text else None
 
-    with open(output_file_path, 'w', encoding='utf-8') as f:
-        f.write(code)
-    print(f"Pydantic model code generated and saved to {output_file_path}")
+            parent_key = find_parent_key(field.key, blocks_map) if field.key else None
+            parent_value = None  # You can similarly attempt to find parent value if needed
 
-# Example usage
-generate_pydantic_from_json('your_file.json', 'model.py')
+            field_data = {
+                "parentKey": parent_key,
+                "parentValue": parent_value,
+                "keyId": field.key.id,
+                "key": key,
+                "value": value,
+                "bbox": field.key.geometry.bounding_box._asdict() if field.key.geometry else None
+            }
+            form_fields.append(field_data)
