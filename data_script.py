@@ -1,46 +1,49 @@
-from trp import Document
+def get_signature_block_by_key(textract_response, target_key):
+“””
+Find signature block associated with a specific key using Textract’s native relationships.
 
-def extract_keys_with_signatures(textract_response_bytes):
-    """
-    Extract form key texts that have associated signature blocks.
-    Uses TRP v1 to traverse key-value relationships.
-    """
-    doc = Document(textract_response_bytes)
-    results = []
+```
+Args:
+    textract_response: AWS Textract response (dict or boto3 response)
+    target_key: The key text to search for (e.g., "Signature", "Sign Here")
 
-    for page in doc.pages:
-        # Iterate over all key-value sets on the page
-        for kv in page.form.fields:
-            key_block = kv.key
-            if not key_block:
-                continue
+Returns:
+    dict: Block containing the signature if found, None otherwise
+"""
+import trp  # AWS Textract Response Parser
 
-            # Check if any child of the key block is a signature
-            signature_child = None
-            for rel in key_block.relationships or []:
-                if rel.type == "CHILD":
-                    for child_id in rel.ids:
-                        # Find the child block by ID
-                        child_block = page.block_map.get(child_id)
-                        if child_block and child_block.block_type == "SIGNATURE":
-                            signature_child = child_block
-                            break
-                if signature_child:
-                    break
+# Parse the Textract response using TRP
+doc = trp.Document(textract_response)
 
-            if signature_child:
-                results.append({
-                    "key_text": key_block.text,
-                    "signature_id": signature_child.id,
-                    "signature_confidence": signature_child.confidence,
-                    "page": page.page_number,
-                    "signature_bbox": signature_child.geometry.bounding_box,
-                })
+# Iterate through all pages in the document
+for page in doc.pages:
+    # Get all form fields (key-value pairs) from the page
+    for field in page.form.fields:
+        # Check if the key matches our target (case-insensitive partial match)
+        if field.key and target_key.lower() in field.key.text.lower():
+            # Check if the value contains signature-related content
+            if field.value:
+                # Textract identifies signatures in forms - check for signature blocks
+                value_block = field.value
+                
+                # Look for child blocks that might be signatures
+                for relationship in value_block.block.get('Relationships', []):
+                    if relationship['Type'] == 'CHILD':
+                        for child_id in relationship['Ids']:
+                            # Find the child block in the response
+                            child_block = next(
+                                (block for block in textract_response['Blocks'] 
+                                 if block['Id'] == child_id), None
+                            )
+                            
+                            # Check if this block is identified as a signature
+                            if (child_block and 
+                                child_block.get('BlockType') == 'SIGNATURE'):
+                                return child_block
+                
+                # If no signature block found in children, return the value block
+                # (it might contain signature information)
+                return value_block.block
 
-    return results
-
-# Usage:
-# response_bytes = your_textract_client.analyze_document(...).to_json().encode()
-# key_signatures = extract_keys_with_signatures(response_bytes)
-# for entry in key_signatures:
-#     print(entry)
+return None
+```
