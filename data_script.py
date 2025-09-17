@@ -1,23 +1,8 @@
 def extract_all_signatures(textract_response, doc=None):
-“””
-Extract all signatures from Textract response - both form-based and standalone signatures.
-
-```
-Args:
-    textract_response: Raw Textract response (dict or boto3 response)
-    doc: Optional TRP Document object (will create if not provided)
-
-Returns:
-    dict: {
-        'form_signatures': [{'key': str, 'signature_block': dict, 'field': TRP_Field}],
-        'standalone_signatures': [signature_block_dict],
-        'all_signature_blocks': [all_signature_blocks]
-    }
-"""
 import logging
 
+
 try:
-    # Initialize TRP document if not provided
     if doc is None:
         import trp
         doc = trp.Document(textract_response)
@@ -26,25 +11,22 @@ try:
     standalone_signatures = []
     all_signature_blocks = []
     
-    # Get all signature blocks from raw response first
     signature_blocks = [
         block for block in textract_response.get('Blocks', [])
         if block.get('BlockType') == 'SIGNATURE'
     ]
     
     all_signature_blocks.extend(signature_blocks)
-    form_signature_ids = set()  # Track signatures that are part of forms
+    form_signature_ids = set()
     
-    # 1. Extract form-based signatures (signatures that are values in key-value pairs)
     try:
         for page in doc.pages:
             for field in page.form.fields:
-                if field.key:  # Only process fields with keys
+                if field.key:
                     try:
                         is_signature = False
                         signature_block = None
                         
-                        # Check if field has a value with signature
                         if field.value and hasattr(field.value, 'block'):
                             relationships = field.value.block.get('Relationships', [])
                             
@@ -60,7 +42,7 @@ try:
                                             child_block.get('BlockType') == 'SIGNATURE'):
                                             is_signature = True
                                             signature_block = child_block
-                                            form_signature_ids.add(child_id)  # Track this signature
+                                            form_signature_ids.add(child_id)
                                             break
                             
                             if is_signature:
@@ -77,7 +59,6 @@ try:
     except Exception as form_error:
         logging.warning(f"Error processing form fields: {form_error}")
     
-    # 2. Extract standalone signatures (signatures not part of any form)
     for sig_block in signature_blocks:
         if sig_block.get('Id') not in form_signature_ids:
             standalone_signatures.append(sig_block)
@@ -105,22 +86,11 @@ except Exception as e:
 ```
 
 def is_field_signature(field, textract_response):
-“””
-Simplified method to check if a specific form field contains a signature.
-Use this in your existing loop for the isSignature flag.
+try:
+if not field.value or not hasattr(field.value, ‘block’):
+return False
 
 ```
-Args:
-    field: TRP Field object
-    textract_response: Raw Textract response
-
-Returns:
-    bool: True if field contains signature, False otherwise
-"""
-try:
-    if not field.value or not hasattr(field.value, 'block'):
-        return False
-    
     relationships = field.value.block.get('Relationships', [])
     
     for relationship in relationships:
@@ -140,4 +110,3 @@ try:
 except Exception as e:
     logging.warning(f"Error checking field signature: {e}")
     return False
-```
